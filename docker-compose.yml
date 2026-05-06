@@ -1,0 +1,33 @@
+version: "3.9"
+
+# Optional: run production-grade equivalents locally
+# This project works 100% without Docker using SQLite + ChromaDB local mode.
+# Use this only if you want to swap to real Postgres + Redis.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: cineai
+      POSTGRES_PASSWORD: cineai
+      POSTGRES_DB: cineai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadata:/chroma/chroma
+
+volumes:
+  pgdata:
+  chromadata:
