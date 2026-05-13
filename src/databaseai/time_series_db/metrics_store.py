@@ -105,18 +105,7 @@ class MetricsStore:
             finally:
                 conn.close()
 
-    # ------------------------------------------------------------------
-    # Write path
-    # ------------------------------------------------------------------
-
-    def record_metric(
-        self,
-        model_ver: str,
-        variant: str,
-        metric_name: str,
-        value: float,
-        at: Optional[str] = None,
-    ) -> int:
+    def record_metric(self, model_ver, variant, metric_name, value, at=None):
         ts = at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
             cur = conn.execute(
@@ -127,16 +116,7 @@ class MetricsStore:
             )
             return cur.lastrowid
 
-    def bulk_record_metrics(
-        self, rows: list[tuple]
-    ) -> None:
-        """
-        Insert many metric rows in a single transaction.
-
-        Each tuple: (model_ver, variant, metric_name, metric_value, recorded_at).
-        One transaction for the entire batch is orders of magnitude faster than
-        individual INSERTs because SQLite flushes the WAL once per commit.
-        """
+    def bulk_record_metrics(self, rows):
         with self._conn() as conn:
             conn.executemany(
                 """INSERT INTO model_metrics
@@ -145,13 +125,7 @@ class MetricsStore:
                 rows,
             )
 
-    def record_event(
-        self,
-        event_type: str,
-        description: str = "",
-        metadata: Optional[dict] = None,
-        at: Optional[str] = None,
-    ) -> int:
+    def record_event(self, event_type, description="", metadata=None, at=None):
         ts = at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
             cur = conn.execute(
@@ -162,18 +136,7 @@ class MetricsStore:
             )
             return cur.lastrowid
 
-    # ------------------------------------------------------------------
-    # Read path
-    # ------------------------------------------------------------------
-
-    def query_window(
-        self,
-        metric_name: str,
-        start: str,
-        end: str,
-        variant: Optional[str] = None,
-    ) -> list[dict]:
-        """Return all raw metric rows within [start, end] (inclusive)."""
+    def query_window(self, metric_name, start, end, variant=None):
         with self._conn() as conn:
             if variant:
                 rows = conn.execute(
@@ -192,24 +155,7 @@ class MetricsStore:
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def downsample(
-        self,
-        metric_name: str,
-        bucket_fmt: str,
-        start: str,
-        end: str,
-        variant: Optional[str] = None,
-    ) -> list[dict]:
-        """
-        Aggregate raw metrics into time buckets using AVG.
-
-        bucket_fmt controls bucket granularity via strftime():
-          '%Y-%m-%d %H:00:00'  → hourly buckets
-          '%Y-%m-%d'           → daily buckets
-
-        This is the canonical time-series storage trade-off: recent data stays
-        at full resolution; older data gets rolled up to save disk space.
-        """
+    def downsample(self, metric_name, bucket_fmt, start, end, variant=None):
         with self._conn() as conn:
             if variant:
                 rows = conn.execute(
@@ -242,10 +188,7 @@ class MetricsStore:
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def latest_metric(
-        self, metric_name: str, variant: Optional[str] = None
-    ) -> Optional[dict]:
-        """Return the single most recent row for a metric (and optional variant)."""
+    def latest_metric(self, metric_name, variant=None):
         with self._conn() as conn:
             if variant:
                 row = conn.execute(
@@ -263,12 +206,7 @@ class MetricsStore:
                 ).fetchone()
             return dict(row) if row else None
 
-    def ab_test_summary(self, metric_name: str) -> list[dict]:
-        """
-        Return per-variant statistics for a given metric, ordered by avg descending.
-
-        The first row is the winning variant — the one to promote to 100% traffic.
-        """
+    def ab_test_summary(self, metric_name):
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT variant,
@@ -285,19 +223,7 @@ class MetricsStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def detect_trend(
-        self,
-        metric_name: str,
-        variant: str,
-        window_size: int = 5,
-    ) -> dict:
-        """
-        Compute the slope of the last `window_size` data points via
-        ordinary least-squares linear regression.
-
-        A slope above +0.001 signals improvement; below -0.001 signals
-        degradation and can trigger an automated rollback in production.
-        """
+    def detect_trend(self, metric_name, variant, window_size=5):
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT metric_value FROM model_metrics
@@ -305,35 +231,20 @@ class MetricsStore:
                    ORDER BY recorded_at DESC LIMIT ?""",
                 (metric_name, variant, window_size),
             ).fetchall()
-
         values = [r[0] for r in reversed(rows)]
         n = len(values)
         if n < 2:
             return {"slope": 0.0, "n": n, "direction": "stable", "values": values}
-
         xs = list(range(n))
         mean_x = sum(xs) / n
         mean_y = sum(values) / n
-        numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values))
+        numerator   = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values))
         denominator = sum((x - mean_x) ** 2 for x in xs)
         slope = numerator / denominator if denominator else 0.0
+        direction = "improving" if slope > 0.001 else ("degrading" if slope < -0.001 else "stable")
+        return {"slope": round(slope, 6), "n": n, "direction": direction, "values": values}
 
-        if slope > 0.001:
-            direction = "improving"
-        elif slope < -0.001:
-            direction = "degrading"
-        else:
-            direction = "stable"
-
-        return {
-            "slope": round(slope, 6),
-            "n": n,
-            "direction": direction,
-            "values": values,
-        }
-
-    def query_events(self, start: str, end: str) -> list[dict]:
-        """Return system events within [start, end] ordered chronologically."""
+    def query_events(self, start, end):
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM system_events
@@ -348,10 +259,10 @@ class MetricsStore:
                 result.append(d)
             return result
 
-    def metric_count(self) -> int:
+    def metric_count(self):
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) FROM model_metrics").fetchone()[0]
 
-    def event_count(self) -> int:
+    def event_count(self):
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) FROM system_events").fetchone()[0]

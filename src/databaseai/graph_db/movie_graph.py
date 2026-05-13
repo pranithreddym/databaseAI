@@ -24,12 +24,12 @@ DB Architect notes:
     deep multi-hop analytics (>3 hops) used for fraud detection.
 
 Production parallels:
-  - Netflix "because you watched X" traverses a movie–genre–director bipartite
-    graph finding titles 1–2 hops away from the seed title.
+  - Netflix "because you watched X" traverses a movie-genre-director bipartite
+    graph finding titles 1-2 hops away from the seed title.
   - LinkedIn "People You May Know" runs BFS capped at depth 2, then ranks
     candidates by mutual-connection count.
-  - IMDb's Six Degrees of Kevin Bacon is BFS over the actor–movie bipartite
-    graph; the average path length is ≈ 2.9 hops.
+  - IMDb's Six Degrees of Kevin Bacon is BFS over the actor-movie bipartite
+    graph; the average path length is ~2.9 hops.
 """
 
 import sqlite3
@@ -38,10 +38,6 @@ from contextlib import contextmanager
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
-# Synthetic cast data (3 actors per movie for demonstration)
-# Chosen to create cross-genre bridges that make graph traversal interesting.
-# ---------------------------------------------------------------------------
 CAST: dict[str, list[str]] = {
     "m01": ["Leonardo DiCaprio", "Joseph Gordon-Levitt", "Michael Caine"],
     "m02": ["Christian Bale", "Heath Ledger", "Michael Caine"],
@@ -83,11 +79,9 @@ CREATE TABLE IF NOT EXISTS edges (
     PRIMARY KEY (from_node, to_node, edge_type)
 );
 
--- Neighbor lookup: O(log E + degree)
 CREATE INDEX IF NOT EXISTS idx_edges_from
     ON edges (from_node, edge_type);
 
--- Reverse lookup (incoming edges, e.g. for PageRank)
 CREATE INDEX IF NOT EXISTS idx_edges_to
     ON edges (to_node, edge_type);
 """
@@ -138,71 +132,32 @@ class MovieGraph:
             finally:
                 conn.close()
 
-    # ------------------------------------------------------------------
-    # Write path
-    # ------------------------------------------------------------------
-
-    def add_node(
-        self,
-        node_id: str,
-        label: str,
-        genre: Optional[str] = None,
-        director: Optional[str] = None,
-        year: Optional[int] = None,
-    ) -> None:
+    def add_node(self, node_id, label, genre=None, director=None, year=None):
         with self._conn() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO nodes (node_id, label, genre, director, year) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO nodes (node_id, label, genre, director, year) VALUES (?, ?, ?, ?, ?)",
                 (node_id, label, genre, director, year),
             )
 
-    def add_edge(
-        self,
-        from_node: str,
-        to_node: str,
-        edge_type: str,
-        weight: float = 1.0,
-    ) -> None:
-        """Insert an undirected edge as two directed rows."""
+    def add_edge(self, from_node, to_node, edge_type, weight=1.0):
         with self._conn() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO edges (from_node, to_node, edge_type, weight) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO edges (from_node, to_node, edge_type, weight) VALUES (?, ?, ?, ?)",
                 (from_node, to_node, edge_type, weight),
             )
             conn.execute(
-                "INSERT OR IGNORE INTO edges (from_node, to_node, edge_type, weight) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO edges (from_node, to_node, edge_type, weight) VALUES (?, ?, ?, ?)",
                 (to_node, from_node, edge_type, weight),
             )
 
-    def build_from_seed(self, movies: list[dict], cast: Optional[dict] = None) -> None:
-        """
-        Populate the graph from a list of movie dicts and optional cast mapping.
-
-        Edges created:
-          same_director — both movies share the same director
-          same_genre    — both movies share the same genre
-          co_actor      — both movies share at least one cast member
-        """
+    def build_from_seed(self, movies, cast=None):
         cast = cast or {}
-
-        # Insert nodes
         for m in movies:
-            self.add_node(
-                m["id"],
-                f"{m['title']} ({m['year']})",
-                genre=m.get("genre"),
-                director=m.get("director"),
-                year=m.get("year"),
-            )
-
-        # Build reverse-lookup maps for O(n) edge construction instead of O(n²)
-        by_director: dict[str, list[str]] = {}
-        by_genre: dict[str, list[str]] = {}
-        by_actor: dict[str, list[str]] = {}
-
+            self.add_node(m["id"], f"{m['title']} ({m['year']})",
+                          genre=m.get("genre"), director=m.get("director"), year=m.get("year"))
+        by_director: dict[str, list] = {}
+        by_genre:    dict[str, list] = {}
+        by_actor:    dict[str, list] = {}
         for m in movies:
             mid = m["id"]
             if m.get("director"):
@@ -212,31 +167,22 @@ class MovieGraph:
             for actor in cast.get(mid, []):
                 by_actor.setdefault(actor, []).append(mid)
 
-        def _pair_edges(groups: dict[str, list[str]], etype: str) -> None:
+        def _pair_edges(groups, etype):
             for members in groups.values():
                 for i in range(len(members)):
                     for j in range(i + 1, len(members)):
                         self.add_edge(members[i], members[j], etype)
 
         _pair_edges(by_director, "same_director")
-        _pair_edges(by_genre, "same_genre")
-        _pair_edges(by_actor, "co_actor")
+        _pair_edges(by_genre,    "same_genre")
+        _pair_edges(by_actor,    "co_actor")
 
-    # ------------------------------------------------------------------
-    # Read path
-    # ------------------------------------------------------------------
-
-    def get_node(self, node_id: str) -> Optional[dict]:
+    def get_node(self, node_id):
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM nodes WHERE node_id = ?", (node_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
         return dict(row) if row else None
 
-    def neighbors(
-        self, node_id: str, edge_type: Optional[str] = None
-    ) -> list[dict]:
-        """Return all neighbors with the edge type connecting them."""
+    def neighbors(self, node_id, edge_type=None):
         with self._conn() as conn:
             if edge_type:
                 rows = conn.execute(
@@ -258,13 +204,11 @@ class MovieGraph:
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    def degree(self, node_id: str, edge_type: Optional[str] = None) -> int:
-        """Count unique neighbors (undirected degree)."""
+    def degree(self, node_id, edge_type=None):
         with self._conn() as conn:
             if edge_type:
                 return conn.execute(
-                    "SELECT COUNT(DISTINCT to_node) FROM edges "
-                    "WHERE from_node = ? AND edge_type = ?",
+                    "SELECT COUNT(DISTINCT to_node) FROM edges WHERE from_node = ? AND edge_type = ?",
                     (node_id, edge_type),
                 ).fetchone()[0]
             return conn.execute(
@@ -272,10 +216,7 @@ class MovieGraph:
                 (node_id,),
             ).fetchone()[0]
 
-    def most_connected(
-        self, n: int = 5, edge_type: Optional[str] = None
-    ) -> list[dict]:
-        """Return the top-n nodes ranked by undirected degree (descending)."""
+    def most_connected(self, n=5, edge_type=None):
         with self._conn() as conn:
             if edge_type:
                 rows = conn.execute(
@@ -283,8 +224,7 @@ class MovieGraph:
                               COUNT(DISTINCT e.to_node) AS degree
                        FROM edges e JOIN nodes nd ON e.from_node = nd.node_id
                        WHERE e.edge_type = ?
-                       GROUP BY e.from_node
-                       ORDER BY degree DESC LIMIT ?""",
+                       GROUP BY e.from_node ORDER BY degree DESC LIMIT ?""",
                     (edge_type, n),
                 ).fetchall()
             else:
@@ -292,57 +232,33 @@ class MovieGraph:
                     """SELECT e.from_node AS node_id, nd.label,
                               COUNT(DISTINCT e.to_node) AS degree
                        FROM edges e JOIN nodes nd ON e.from_node = nd.node_id
-                       GROUP BY e.from_node
-                       ORDER BY degree DESC LIMIT ?""",
+                       GROUP BY e.from_node ORDER BY degree DESC LIMIT ?""",
                     (n,),
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    # ------------------------------------------------------------------
-    # Traversal algorithms
-    # ------------------------------------------------------------------
-
-    def _load_adj(self, edge_type: Optional[str] = None) -> dict[str, list[str]]:
-        """Load the full adjacency list into a Python dict for in-memory traversal.
-
-        Loading once and traversing in memory is far faster than issuing one
-        SQL query per visited node — critical when paths span many hops.
-        """
+    def _load_adj(self, edge_type=None):
         with self._conn() as conn:
             if edge_type:
                 rows = conn.execute(
-                    "SELECT from_node, to_node FROM edges WHERE edge_type = ?",
-                    (edge_type,),
+                    "SELECT from_node, to_node FROM edges WHERE edge_type = ?", (edge_type,)
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    "SELECT DISTINCT from_node, to_node FROM edges"
-                ).fetchall()
-        adj: dict[str, list[str]] = {}
+                rows = conn.execute("SELECT DISTINCT from_node, to_node FROM edges").fetchall()
+        adj: dict[str, list] = {}
         for from_n, to_n in rows:
             adj.setdefault(from_n, []).append(to_n)
         return adj
 
-    def bfs(
-        self,
-        start_id: str,
-        end_id: str,
-        edge_type: Optional[str] = None,
-    ) -> list[str]:
-        """
-        Breadth-first search returning the shortest path (min hops).
-
-        Returns a list of node_ids from start to end, or [] if unreachable.
-        BFS is O(V + E) and guarantees optimality on unweighted graphs.
-        """
+    def bfs(self, start_id, end_id, edge_type=None):
         if start_id == end_id:
             return [start_id]
         adj = self._load_adj(edge_type)
-        queue: deque[list[str]] = deque([[start_id]])
-        visited: set[str] = {start_id}
+        queue: deque = deque([[start_id]])
+        visited = {start_id}
         while queue:
             path = queue.popleft()
-            for neighbor in dict.fromkeys(adj.get(path[-1], [])):  # deduplicated
+            for neighbor in dict.fromkeys(adj.get(path[-1], [])):
                 if neighbor == end_id:
                     return path + [neighbor]
                 if neighbor not in visited:
@@ -350,23 +266,12 @@ class MovieGraph:
                     queue.append(path + [neighbor])
         return []
 
-    def dfs(
-        self,
-        start_id: str,
-        end_id: str,
-        edge_type: Optional[str] = None,
-    ) -> list[str]:
-        """
-        Depth-first search returning the first path found (not necessarily shortest).
-
-        DFS uses less memory than BFS on wide graphs and is preferred when
-        any valid path is acceptable (e.g., "can we reach this node at all?").
-        """
+    def dfs(self, start_id, end_id, edge_type=None):
         if start_id == end_id:
             return [start_id]
         adj = self._load_adj(edge_type)
 
-        def _dfs(node: str, visited: set[str], path: list[str]) -> list[str]:
+        def _dfs(node, visited, path):
             for neighbor in dict.fromkeys(adj.get(node, [])):
                 if neighbor == end_id:
                     return path + [neighbor]
@@ -379,31 +284,17 @@ class MovieGraph:
 
         return _dfs(start_id, {start_id}, [start_id])
 
-    def connected_components(
-        self, edge_type: Optional[str] = None
-    ) -> list[list[str]]:
-        """
-        Discover all connected components via multi-source BFS.
-
-        Returns a list of components (each a list of node_ids), ordered by
-        component size descending. This is the standard way to answer
-        "which movies are unreachable from each other?" — a useful sanity
-        check before running recommendation traversals.
-        """
+    def connected_components(self, edge_type=None):
         adj = self._load_adj(edge_type)
         with self._conn() as conn:
-            all_nodes = [
-                r[0] for r in conn.execute("SELECT node_id FROM nodes").fetchall()
-            ]
-
-        visited: set[str] = set()
-        components: list[list[str]] = []
-
+            all_nodes = [r[0] for r in conn.execute("SELECT node_id FROM nodes").fetchall()]
+        visited: set = set()
+        components = []
         for start in all_nodes:
             if start in visited:
                 continue
-            component: list[str] = []
-            queue: deque[str] = deque([start])
+            component = []
+            queue: deque = deque([start])
             visited.add(start)
             while queue:
                 node = queue.popleft()
@@ -413,26 +304,19 @@ class MovieGraph:
                         visited.add(neighbor)
                         queue.append(neighbor)
             components.append(component)
-
         components.sort(key=len, reverse=True)
         return components
 
-    # ------------------------------------------------------------------
-    # Metrics
-    # ------------------------------------------------------------------
-
-    def node_count(self) -> int:
+    def node_count(self):
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
 
-    def edge_count(self, directed: bool = False) -> int:
-        """Return the number of edges. Default: undirected (directed_rows / 2)."""
+    def edge_count(self, directed=False):
         with self._conn() as conn:
             total = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
         return total if directed else total // 2
 
-    def edge_type_counts(self) -> dict[str, int]:
-        """Return undirected edge count per edge type."""
+    def edge_type_counts(self):
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT edge_type, COUNT(*) / 2 AS cnt FROM edges GROUP BY edge_type"

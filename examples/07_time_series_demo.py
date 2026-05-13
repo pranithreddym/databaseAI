@@ -25,7 +25,7 @@ from databaseai.time_series_db import MetricsStore
 
 console = Console()
 
-# ── Synthetic data parameters ────────────────────────────────────────────────
+# ── Synthetic data parameters ─────────────────────────────────────────────
 SEED = 42
 random.seed(SEED)
 
@@ -59,7 +59,6 @@ def _seed_metrics(store: MetricsStore) -> None:
 
     store.bulk_record_metrics(rows)
 
-    # System events marking key moments in the A/B rollout
     events = [
         ("deployment", "Model v1.0 deployed to 100% production",
          {"version": "v1.0", "traffic_pct": 100},       _ts(0)),
@@ -85,7 +84,6 @@ def main():
 
     store = MetricsStore()
 
-    # ── 1. Data Ingestion ──────────────────────────────────────────────────
     console.print(Panel(
         "[bold]1. Data Ingestion — 7 days of hourly A/B test metrics[/bold]",
         box=box.ROUNDED,
@@ -97,7 +95,6 @@ def main():
     console.print("  [dim]Metrics: precision@10 and NDCG@10  |  "
                   "Variants: control (v1.0) vs treatment (v1.1)[/dim]")
 
-    # ── 2. Time-Windowed Queries ───────────────────────────────────────────
     console.print()
     console.print(Panel(
         "[bold]2. Time-Windowed Queries — Rolling Windows on precision@10[/bold]",
@@ -118,90 +115,47 @@ def main():
         if rows:
             vals = [r["metric_value"] for r in rows]
             t.add_row(
-                label,
-                str(len(rows)),
+                label, str(len(rows)),
                 f"{sum(vals)/len(vals):.4f}",
                 f"{min(vals):.4f}",
                 f"{max(vals):.4f}",
             )
     console.print(t)
 
-    # ── 3. Downsampling ────────────────────────────────────────────────────
     console.print()
     console.print(Panel(
         "[bold]3. Downsampling — Hourly Data → Daily Averages[/bold]",
         box=box.ROUNDED,
     ))
-    console.print("  [dim]7 days × 2 variants = 336 raw rows → 14 daily buckets  "
-                  "(24× storage reduction)[/dim]")
-
     start_all = _ts(0)
     end_all   = _ts(HOURS - 1)
-
     daily = store.downsample("precision_at_10", "%Y-%m-%d", start_all, end_all)
-
-    t = Table("Date", "Variant", "Avg prec@10", "Min", "Max", "Samples",
-              box=box.SIMPLE_HEAD)
+    t = Table("Date", "Variant", "Avg prec@10", "Min", "Max", "Samples", box=box.SIMPLE_HEAD)
     for row in daily:
-        t.add_row(
-            row["bucket"],
-            row["variant"],
-            f"{row['avg_value']:.4f}",
-            f"{row['min_value']:.4f}",
-            f"{row['max_value']:.4f}",
-            str(row["sample_count"]),
-        )
+        t.add_row(row["bucket"], row["variant"],
+                  f"{row['avg_value']:.4f}", f"{row['min_value']:.4f}",
+                  f"{row['max_value']:.4f}", str(row["sample_count"]))
     console.print(t)
 
-    raw_per_metric = store.metric_count() // 2
-    console.print(f"  Raw rows per metric: {raw_per_metric} → "
-                  f"Downsampled rows: {len(daily)}  "
-                  f"({raw_per_metric // max(len(daily), 1)}× reduction)")
-
-    # ── 4. A/B Test Summary ────────────────────────────────────────────────
     console.print()
-    console.print(Panel(
-        "[bold]4. A/B Test Summary — Which Variant Wins?[/bold]",
-        box=box.ROUNDED,
-    ))
-
+    console.print(Panel("[bold]4. A/B Test Summary — Which Variant Wins?[/bold]", box=box.ROUNDED))
     for metric in ("precision_at_10", "ndcg_at_10"):
         summary = store.ab_test_summary(metric)
-        t = Table(
-            "Variant", "Samples", "Avg", "Min", "Max",
-            title=f"[bold]{metric}[/bold]",
-            box=box.SIMPLE_HEAD,
-        )
+        t = Table("Variant", "Samples", "Avg", "Min", "Max",
+                  title=f"[bold]{metric}[/bold]", box=box.SIMPLE_HEAD)
         for i, row in enumerate(summary):
             tag = " [green]← winner[/green]" if i == 0 else ""
-            t.add_row(
-                row["variant"] + tag,
-                str(row["sample_count"]),
-                f"{row['avg_value']:.4f}",
-                f"{row['min_value']:.4f}",
-                f"{row['max_value']:.4f}",
-            )
+            t.add_row(row["variant"] + tag, str(row["sample_count"]),
+                      f"{row['avg_value']:.4f}", f"{row['min_value']:.4f}",
+                      f"{row['max_value']:.4f}")
         console.print(t)
 
-    prec = {r["variant"]: r["avg_value"] for r in store.ab_test_summary("precision_at_10")}
-    if "treatment" in prec and "control" in prec and prec["control"] > 0:
-        lift = (prec["treatment"] - prec["control"]) / prec["control"] * 100
-        console.print(
-            f"  [green]Treatment lift over control (precision@10): "
-            f"+{lift:.1f}%[/green]"
-        )
-
-    # ── 5. Trend Detection ─────────────────────────────────────────────────
     console.print()
     console.print(Panel(
         "[bold]5. Trend Detection — Slope of Last N Observations[/bold]",
         box=box.ROUNDED,
     ))
-    console.print("  [dim]Positive slope → improving; negative → degrading.  "
-                  "Slope < −0.001 triggers an auto-rollback alert in production.[/dim]")
-
-    t = Table("Variant", "Metric", "Window (n)", "Slope", "Direction",
-              box=box.SIMPLE_HEAD)
+    t = Table("Variant", "Metric", "Window (n)", "Slope", "Direction", box=box.SIMPLE_HEAD)
     direction_style = {
         "improving": "[green]improving ↑[/green]",
         "degrading":  "[red]degrading ↓[/red]",
@@ -211,41 +165,25 @@ def main():
         for metric in ("precision_at_10", "ndcg_at_10"):
             for window in (10, 30):
                 trend = store.detect_trend(metric, variant, window_size=window)
-                t.add_row(
-                    variant,
-                    metric,
-                    str(window),
-                    f"{trend['slope']:+.6f}",
-                    direction_style[trend["direction"]],
-                )
+                t.add_row(variant, metric, str(window),
+                          f"{trend['slope']:+.6f}", direction_style[trend["direction"]])
     console.print(t)
 
-    # ── 6. System Events Timeline ──────────────────────────────────────────
     console.print()
-    console.print(Panel(
-        "[bold]6. System Events Timeline — A/B Rollout Chronicle[/bold]",
-        box=box.ROUNDED,
-    ))
-
+    console.print(Panel("[bold]6. System Events Timeline[/bold]", box=box.ROUNDED))
     events = store.query_events(_ts(0), _ts(HOURS))
     t = Table("Timestamp", "Event Type", "Description", box=box.SIMPLE_HEAD)
     for ev in events:
         t.add_row(ev["occurred_at"], ev["event_type"], ev["description"])
     console.print(t)
 
-    # ── Key Takeaways ──────────────────────────────────────────────────────
     console.print()
     console.print("[bold green]Key Time-Series DB Takeaways:[/bold green]")
-    console.print("  • [cyan]Time-windowed queries[/cyan]    — "
-                  "BETWEEN on (metric_name, recorded_at) index is O(log n + k)")
-    console.print("  • [cyan]Downsampling[/cyan]            — "
-                  "strftime() bucketing reduces 336 rows to 14 with one GROUP BY")
-    console.print("  • [cyan]Trend detection[/cyan]         — "
-                  "OLS slope on a rolling window drives auto-alerts and rollbacks")
-    console.print("  • [cyan]A/B test metrics[/cyan]        — "
-                  "per-variant aggregation reveals the winning model variant")
-    console.print("  [dim]Production: TimescaleDB hypertables, InfluxDB TSM engine, "
-                  "Prometheus + Thanos[/dim]")
+    console.print("  • [cyan]Time-windowed queries[/cyan]    — BETWEEN on (metric_name, recorded_at) index is O(log n + k)")
+    console.print("  • [cyan]Downsampling[/cyan]            — strftime() bucketing reduces 336 rows to 14 with one GROUP BY")
+    console.print("  • [cyan]Trend detection[/cyan]         — OLS slope on a rolling window drives auto-alerts and rollbacks")
+    console.print("  • [cyan]A/B test metrics[/cyan]        — per-variant aggregation reveals the winning model variant")
+    console.print("  [dim]Production: TimescaleDB hypertables, InfluxDB TSM engine, Prometheus + Thanos[/dim]")
 
 
 if __name__ == "__main__":
